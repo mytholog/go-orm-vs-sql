@@ -3,16 +3,16 @@ package main
 import (
 	"context"
 	"errors"
-	"example.com/go-orm-vs-sql/internal/repository"
 	"fmt"
-	"github.com/jackc/pgx/v5"
-	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
 	"log"
 	"os"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"example.com/go-orm-vs-sql/internal/repository"
+	"github.com/jackc/pgx/v5"
+	"gorm.io/gorm"
 )
 
 func check(e error) {
@@ -43,18 +43,29 @@ type Product struct {
 }
 
 func main() {
-	ctx := context.Background()
-	c, e := repository.Open(ctx)
-	check(e)
-	defer c.Close()
 	mode := "crud"
 	if len(os.Args) > 1 {
 		mode = os.Args[1]
 	}
+	switch mode {
+	case "-h", "--help", "help":
+		fmt.Println("Usage: demo [crud|n-plus-one|zero-values|select-star|filters|transactions|bulk]")
+		return
+	case "crud", "n-plus-one", "zero-values", "select-star", "filters", "transactions", "bulk":
+	default:
+		log.Fatal("unknown demo: ", mode)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	c, err := repository.Open(ctx)
+	check(err)
+	defer c.Close()
 	db := c.Gorm.WithContext(ctx)
 	switch mode {
 	case "crud":
-		for n, r := range c.Readers() {
+		readers := c.Readers()
+		for _, n := range []string{"pgx", "sqlx", "gorm", "sqlc"} {
+			r := readers[n]
 			u, e := r.GetUser(ctx, 1)
 			check(e)
 			fmt.Println(n, u)
@@ -66,9 +77,14 @@ func main() {
 		for i := range users {
 			check(d.Where("user_id = ?", users[i].ID).Find(&users[i].Orders).Error)
 		}
-		fmt.Println("101 queries; now preload")
+		fmt.Printf("%d queries; now preload\n", 1+len(users))
+		users = nil
 		check(d.Limit(100).Order("id").Preload("Orders").Find(&users).Error)
-		fmt.Println("2 queries")
+		preloadQueries := 1
+		if len(users) > 0 {
+			preloadQueries++
+		}
+		fmt.Printf("%d queries\n", preloadQueries)
 	case "zero-values":
 		d := db.Debug()
 		check(d.Model(&Product{}).Where("id = ?", 1).Update("stock", 10).Error)
@@ -80,17 +96,20 @@ func main() {
 		check(d.First(&p, 1).Error)
 		fmt.Println("map:", p.Stock)
 	case "select-star":
-		for _, q := range []string{"SELECT * FROM users LIMIT 1000", "SELECT id,name FROM users LIMIT 1000"} {
+		for _, q := range []string{"SELECT * FROM users ORDER BY id LIMIT 1000", "SELECT id,name FROM users ORDER BY id LIMIT 1000"} {
 			start := time.Now()
 			rows, e := c.Pool.Query(ctx, q)
 			check(e)
-			n := 0
+			n, payload := 0, 0
 			for rows.Next() {
 				n++
+				for _, value := range rows.RawValues() {
+					payload += len(value)
+				}
 			}
 			check(rows.Err())
 			rows.Close()
-			fmt.Println(q, n, time.Since(start))
+			fmt.Printf("%s: %d rows, %d payload bytes, %s\n", q, n, payload, time.Since(start))
 		}
 	case "filters":
 		id := int64(1)
@@ -112,8 +131,11 @@ func main() {
 			check(e)
 			var wg sync.WaitGroup
 			var successes atomic.Int64
-			var failures atomic.Int64
-			for i := 0; i < 100; i++ {
+			const workers = 100
+			failures := make(chan error, workers)
+			var reads sync.WaitGroup
+			reads.Add(workers)
+			for i := 0; i < workers; i++ {
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
@@ -126,24 +148,30 @@ func main() {
 						}
 					} else {
 						e = c.Pool.QueryRow(ctx, "SELECT stock FROM products WHERE id=1").Scan(&stock)
+						// Each SELECT releases its pooled connection before waiting.
+						reads.Done()
+						reads.Wait()
 						if e == nil && stock > 0 {
-							time.Sleep(time.Millisecond)
 							_, e = c.Pool.Exec(ctx, "UPDATE products SET stock=$1 WHERE id=1", stock-1)
 						} else if e == nil {
 							return
 						}
 					}
 					if e != nil {
-						failures.Add(1)
+						failures <- e
 						return
 					}
 					successes.Add(1)
 				}()
 			}
 			wg.Wait()
+			close(failures)
+			for err := range failures {
+				check(err)
+			}
 			var stock int
 			check(c.Pool.QueryRow(ctx, "SELECT stock FROM products WHERE id=1").Scan(&stock))
-			fmt.Println("atomic", safe, "success", successes.Load(), "errors", failures.Load(), "stock", stock)
+			fmt.Println("atomic", safe, "success", successes.Load(), "stock", stock)
 		}
 	case "bulk":
 		const n = 100000
@@ -153,20 +181,24 @@ func main() {
 			ps[i] = Product{Name: "bulk", Price: 100, Stock: 1}
 			rows[i] = []any{"bulk", 100, 1}
 		}
-		for _, method := range []string{"gorm", "copy"} {
-			_, e := c.Pool.Exec(ctx, "DELETE FROM products WHERE name='bulk'")
-			check(e)
-			start := time.Now()
-			if method == "gorm" {
-				check(db.Session(&gorm.Session{Logger: logger.Default.LogMode(logger.Silent)}).CreateInBatches(ps, 1000).Error)
-			} else {
-				count, e := c.Pool.CopyFrom(ctx, pgx.Identifier{"products"}, []string{"name", "price", "stock"}, pgx.CopyFromRows(rows))
-				check(e)
-				fmt.Println("copied", count)
+		const setup = "CREATE TEMP TABLE bulk_products (LIKE products INCLUDING ALL) ON COMMIT DROP"
+		check(db.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Exec(setup).Error; err != nil {
+				return err
 			}
-			fmt.Println(method, time.Since(start))
-		}
-	default:
-		log.Fatal("unknown demo: ", mode)
+			start := time.Now()
+			result := tx.Table("bulk_products").CreateInBatches(ps, 1000)
+			fmt.Println("gorm", result.RowsAffected, time.Since(start))
+			return result.Error
+		}))
+		check(pgx.BeginFunc(ctx, c.Pool, func(tx pgx.Tx) error {
+			if _, err := tx.Exec(ctx, setup); err != nil {
+				return err
+			}
+			start := time.Now()
+			count, err := tx.CopyFrom(ctx, pgx.Identifier{"bulk_products"}, []string{"name", "price", "stock"}, pgx.CopyFromRows(rows))
+			fmt.Println("copy", count, time.Since(start))
+			return err
+		}))
 	}
 }

@@ -2,12 +2,13 @@ package repository
 
 import (
 	"context"
+	"time"
+
 	"example.com/go-orm-vs-sql/internal/dbgen"
 	sq "github.com/Masterminds/squirrel"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jmoiron/sqlx"
 	"gorm.io/gorm"
-	"time"
 )
 
 type User struct {
@@ -20,7 +21,7 @@ type Reader interface {
 	GetUser(context.Context, int64) (User, error)
 }
 
-const query = `SELECT id,name,email,created_at FROM users WHERE id=$1`
+const query = `SELECT id,name,email,created_at FROM users WHERE id=$1 LIMIT 1`
 
 type PGX struct{ Pool *pgxpool.Pool }
 

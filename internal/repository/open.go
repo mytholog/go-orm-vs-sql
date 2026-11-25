@@ -2,6 +2,9 @@ package repository
 
 import (
 	"context"
+	"fmt"
+	"os"
+
 	"example.com/go-orm-vs-sql/internal/dbgen"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -10,7 +13,6 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
-	"os"
 )
 
 type Connections struct {
@@ -41,11 +43,16 @@ func Open(ctx context.Context) (*Connections, error) {
 	s := sqlx.NewDb(stdlib.OpenDB(*c), "pgx")
 	s.SetMaxOpenConns(10)
 	s.SetMaxIdleConns(10)
-	g, e := gorm.Open(postgres.New(postgres.Config{Conn: s.DB}), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	g, e := gorm.Open(postgres.New(postgres.Config{Conn: s.DB}), &gorm.Config{DisableAutomaticPing: true, Logger: logger.Default.LogMode(logger.Silent)})
 	if e != nil {
 		s.Close()
 		p.Close()
 		return nil, e
+	}
+	if e = s.PingContext(ctx); e != nil {
+		s.Close()
+		p.Close()
+		return nil, fmt.Errorf("ping database/sql: %w", e)
 	}
 	if e = p.Ping(ctx); e != nil {
 		s.Close()

@@ -78,7 +78,7 @@ erDiagram
         bigint id PK
         bigint user_id FK
         text status
-        numeric total_amount
+        bigint total_amount
         timestamptz created_at
     }
     ORDER_ITEMS {
@@ -86,25 +86,17 @@ erDiagram
         bigint order_id FK
         bigint product_id FK
         int quantity
-        numeric price
+        bigint price
     }
     PRODUCTS {
         bigint id PK
         text name
-        numeric price
+        bigint price
         int stock
     }
 ```
 
-Операции для сравнения GORM, pgx, sqlx и sqlc:
-
-- Получение пользователя по ID.
-- Получение списка заказов с товарами.
-- Поиск заказов с динамической фильтрацией.
-- Создание заказа в транзакции.
-- Массовая вставка записей.
-- Формирование аналитического отчёта.
-- Конкурентное изменение остатка товара.
+Все четыре библиотеки выполняют чтение пользователя по ID. Отдельные демонстрации показывают загрузку заказов в GORM, динамические фильтры, конкурентное списание, массовую вставку и отчёт по выручке. Колонки с денежными суммами хранят копейки.
 
 ## 5. Live Coding: простой CRUD
 
@@ -406,6 +398,8 @@ WHERE id = $1 AND version = $2 AND stock > 0;
 | EXPLAIN ANALYZE | План выполнения |
 | Grafana | Визуализация метрик |
 
+Проект включает бенчмарк GetByID. Остальные строки таблицы подходят для упражнений по расширению набора замеров.
+
 | Бенчмарк | Сценарий |
 |---|---|
 | GetByID | Получение одной записи |
@@ -434,7 +428,7 @@ func benchmarkGetUser(b *testing.B, repo UserRepository) {
 ```bash
 go test ./benchmarks/... -run='^$' -bench=. -benchmem -benchtime=3s -count=10
 
-go test ./benchmarks -run='^$' -bench=BenchmarkGORM -cpuprofile=cpu.out -memprofile=mem.out
+go test ./benchmarks -run='^$' -bench=BenchmarkGetUser/gorm -cpuprofile=cpu.out -memprofile=mem.out
 
 go tool pprof -http=:8080 cpu.out
 ```
@@ -594,69 +588,13 @@ D. Посмотреть SQL, план выполнения и метрики
 
 ## 14. Структура демонстрационного репозитория
 
-```text
-go-orm-vs-sql/
-├── cmd/
-│   ├── api/
-│   └── seed/
-├── internal/
-│   ├── domain/
-│   ├── service/
-│   └── repository/
-│       ├── gorm/
-│       ├── pgx/
-│       ├── sqlx/
-│       ├── sqlc/
-│       └── squirrel/
-├── db/
-│   ├── migrations/
-│   └── queries/
-├── benchmarks/
-│   ├── select_test.go
-│   ├── insert_test.go
-│   ├── bulk_test.go
-│   └── parallel_test.go
-├── tests/
-│   └── integration/
-├── examples/
-│   ├── 01-crud/
-│   ├── 02-n-plus-one/
-│   ├── 03-select-star/
-│   ├── 04-zero-values/
-│   ├── 05-complex-sql/
-│   ├── 06-transactions/
-│   ├── 07-bulk-insert/
-│   └── 08-query-plans/
-├── monitoring/
-│   ├── prometheus/
-│   └── grafana/
-├── docs/
-│   ├── webinar.md
-│   └── speaker-notes.md
-├── compose.yaml
-├── sqlc.yaml
-├── Makefile
-├── go.mod
-└── README.md
-```
+- `cmd/demo` содержит сценарии, которые запускаются через `make demo-…`.
+- `internal/repository` содержит реализации чтения GORM, pgx, sqlx и sqlc и построитель фильтров Squirrel.
+- `internal/dbgen` содержит сгенерированный код sqlc.
+- `db` содержит схему, генератор данных, запросы sqlc и сценарий EXPLAIN.
+- `benchmarks` содержит сравнение GetUser и интеграционную проверку результатов четырёх реализаций.
 
-```bash
-make up
-make migrate
-make seed
-make generate
-make test
-make bench
-make profile
-make demo-n-plus-one
-make demo-transactions
-make demo-bulk-insert
-make down
-```
-
-Стек: Go 1.25, PostgreSQL, GORM, pgx/v5, sqlx, sqlc, Squirrel, golang-migrate, Testcontainers, Docker Compose, Prometheus, Grafana, Pyroscope.
-
-Это проект структуры, а не созданный и протестированный репозиторий. Примеры кода — демонстрационные фрагменты.
+Команды подготовки базы и сценарии приведены в [README](../README.md).
 
 ## 15. Материалы для самостоятельного изучения
 
@@ -696,5 +634,3 @@ make down
 - Инструмент должен соответствовать задаче.
 
 Три наиболее эффектные живые демонстрации: **N+1, конкурентное списание остатков и сравнение массовой вставки через GORM и pgx.CopyFrom**.
-
-Следующий этап: презентация на 30–35 слайдов, полноценный демонстрационный репозиторий и сценарий выступления с заметками докладчика для каждого слайда.
